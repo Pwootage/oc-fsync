@@ -93,7 +93,7 @@ local function main()
     if messageType then
       print(messageType)
     end
-    handleEvents()
+    handleEvents(0.5)
   end
 
   if not socket then
@@ -107,8 +107,8 @@ end
 function socketRead(socket, size)
 end
 
-function handleEvents()
-  event.pull(0, "invalid_event_name_just_to_make_signals_process")
+function handleEvents(time)
+  event.pull(time or 0, "invalid_event_name_just_to_make_signals_process")
 end
 
 function termColor(newColor)
