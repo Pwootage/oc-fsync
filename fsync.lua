@@ -1,120 +1,225 @@
 -- MIT licensed. For more details: https://github.com/Pwootage/oc-fsync --
-local component = require("component")
-local internet = require("internet")
-local bit32 = require("bit32")
-local filesystem = require("filesystem")
-local term = require("term")
-local event = require("event")
+local component = require('component')
+local internet = require('internet')
+local bit32 = require('bit32')
+local filesystem = require('filesystem')
+local term = require('term')
+local event = require('event')
 
 -- Parse args
 local args = { ... }
 local server = table.remove(args, 1)
 local port = 3000
-if server and server:find(":") then
+if server and server:find(':') then
   local tmp = server
-  local ind = tmp:find(":")
+  local ind = tmp:find(':')
   server = tmp:sub(1, ind - 1)
   port = tonumber(tmp:sub(ind + 1))
 end
-local root = "/"
+local root = '/'
 local hardwareHash = false
+local serverIdentifier
 
 while (#args > 0) do
   local next = table.remove(args, 1)
-  if next == "--hardwareHash" then
+  if next == '--hardwareHash' then
     hardwareHash = true
-  elseif next == "--root" then
+  elseif next == '--root' then
     root = table.remove(args, 1)
     if not root then
-      print("Must provide an argument to --root")
+      print('Must provide an argument to --root')
     end
-    if not (root:sub(-1) == "/") then root = root .. "/" end
+    if not (root:sub(-1) == '/') then root = root .. '/' end
   end
 end
 
 fileHashes = {}
 
 local function main()
-  print("OpenComputers File Sync")
-  print("Federated OpenComputers <-> Real Computer File Sync")
-  print("")
+  termColor(0xFFFFFF)
+  print('OpenComputers File Sync')
+  print('Federated OpenComputers <-> Real Computer File Sync')
+  print('')
 
-  if not component.isAvailable("internet") then
-    termColor(0xFF0000)
-    print("ERROR:")
-    print("This program requires an internet card to function.")
-    print("Please add one, and try again.")
-    termColor(0xFFFFFF)
+  if not component.isAvailable('internet') then
+    printColor(0xFF0000, 'ERROR:')
+    printColor(0xFF0000, 'This program requires an internet card to function.')
+    printColor(0xFF0000, 'Please add one, and try again.')
     return
   end
 
   if not server then
-    print("Usage: fsync <server>[:port] [base directory] [-options]")
-    print("Available options:")
-    print("--root <directory>\tChoose directory to serve")
-    print("--hardwareHash\tUse data card's hash function (requires data card)")
+    print('Usage: fsync <server>[:port] [base directory] [-options]')
+    print('Available options:')
+    print('--root <directory>\tChoose directory to serve')
+    print('--hardwareHash\tUse data card\'s hash function ( requires data card ) ')
     return
   end
 
-  print("Will connect to server " .. server .. " port " .. port)
-  print("Serving from file root " .. root)
+  print('Will connect to server ' .. server .. ' port ' .. port)
+  print('Serving from file root ' .. root)
   if hardwareHash then
-    if component.isAvailable("data") then
-      print("--hardwareHash set and data card available; will use hardware MD5.")
+    if component.isAvailable('data') then
+      print('--hardwareHash set and data card available; will use hardware MD5.')
     else
-      termColor(0x00FFFF)
-      print("Data card not available; remove --hardwareHash parameter or add data card")
-      termColor(0xFFFFFF)
+      printColor(0x00FFFF, 'Data card not available; remove --hardwareHash parameter or add data card')
       return
     end
   end
-  print("Calculating hash of all files in direcotry...")
+  print('Calculating hash of all files in direcotry...')
   local hashCount = 0
   fsTraverse(root, function(file)
-    local f = io.open(file, "rb")
-    local hash = hashBytes(f:read("*all"))
+    local f = io.open(file, 'rb')
+    local hash = hashBytes(f:read('*all'))
     f:close()
     fileHashes[file] = hash
     hashCount = hashCount + 1
     if (hashCount % 10 == 0) then
-      term.write(".", true)
+      term.write('.', true)
     end
     handleEvents()
   end)
   print()
-  print("Calculated " .. hashCount .. " hashes.")
-  print("Connecting to " .. server .. " port " .. port)
+  print('Calculated ' .. hashCount .. ' hashes.')
+  print('Connecting to ' .. server .. ' port ' .. port)
 
   local socket = internet.open(server, port)
   socket:setTimeout(1)
+  socket.stream.socket:finishConnect()
+  print('Connected!')
 
   while socket do
-    local messageType = socket:read("*line")
-    if messageType then
-      print(messageType)
+    local method, url, headers, body = parseHttp(socket)
+    if method == 'GET' then
+
+      if not url:sub(1, root:len()) == root then
+        sendHttp(socket, 403, 'URL not in specified root - forbidden')
+      else
+        if not filesystem.exists(url) then
+          sendHttp(socket, 404, 'Not Found')
+        elseif filesystem.isDirecotry(url) then
+          sendHttp(socket, 200, 'Directory listing goes here')
+        else
+          local file = io.open(url, 'rb')
+          local respBody = file:read('*all')
+          file:close()
+          printColor(0x6666FF, 'Read ' .. url .. '(' .. respBody:len() .. ' bytes)')
+          sendHttp(socket, 200, respBody)
+        end
+      end
+
+    elseif method == 'PUT' then
+
+      if url == '/fsync.config/remoteUniqueIdentifier' then
+        serverIdentifier = body
+        printColor(0x6666FF, 'Server identifier: ' .. body)
+        sendHttp(socket, 200, 'Upated server identifier')
+      elseif not url:sub(1, root:len()) == root then
+        printColor(0x6666FF, 'Forbidden')
+        sendHttp(socket, 403, 'URL not in specified root - forbidden')
+      else
+        local file = io.open(url, 'wb')
+        file:write(body)
+        file:close()
+        local msg = 'Wrote ' .. url .. '(' .. body:len() .. ' bytes)'
+        printColor(0x6666FF, msg)
+        sendHttp(socket, 200, msg)
+      end
+
+    else
+
+      sendHttp(socket, 501, 'Request method not implemented')
     end
-    handleEvents(0.5)
   end
 
   if not socket then
-    termColor(0xFF0000)
-    print("Connection lost. Exiting.")
-    termColor(0xFFFFFF)
+    printColor(0xFF0000, 'Connection lost. Exiting.')
     return
   end
 end
 
-function socketRead(socket, size)
+function parseHttp(socket)
+  local reqLine = readSocket(socket, '*line')
+  local method, url, ver = reqLine:match('^(%u+) (.+) HTTP/(%d.%d)$')
+  printColor(0x999999, 'Req: ', reqLine, method, url, ver)
+
+  local headers = {}
+  local line = readSocket(socket, '*line')
+  while not (line == '') do
+    local h, v = line:match('^([^:]+): (.*)$')
+    printColor(0x999999, 'Header: ', line, h, v)
+    headers[h] = v
+    line = readSocket(socket, '*line')
+  end
+
+  local body
+  if method == 'PUT' or method == 'POST' then
+    body = readSocket(socket, tonumber(headers['Content-Length']));
+    printColor(0x999999, 'Body length: ' .. body:len())
+  end
+
+  return method, url, headers, body
+end
+
+function sendHttp(socket, code, body, headers)
+  local actualHeaders = {
+    ['Content-Type'] = 'text/plain'
+  }
+  for k, v in pairs(headers or {}) do
+    actualHeaders[k] = v
+  end
+  actualHeaders['Content-Length'] = body:len()
+  local codeDesc = ''
+  if code == 200 then
+    codeDesc = 'OK'
+  elseif code == 400 then
+    codeDesc = 'Bad Request'
+  elseif code == 403 then
+    codeDesc = 'Forbidden'
+  elseif code == 404 then
+    codeDesc = 'Not Found'
+  elseif code == 500 then
+    codeDesc = 'Internal Server Error'
+  elseif code == 501 then
+    codeDesc = 'Not Implmenented'
+  end
+  socket:write('HTTP/1.1 ' .. code .. ' ' .. codeDesc .. '\r\n')
+  for k, v in pairs(actualHeaders) do
+    socket:write(k .. ': ' .. v .. '\r\n')
+  end
+  socket:write('\r\n')
+  socket:write(body)
+end
+
+function readSocket(socket, amount)
+  while true do
+    handleEvents(0.5)
+    if not socket then error("Socket closed.") end
+    local status, res = pcall(function() return socket:read(amount) end)
+    if status then
+      if amount == '*line' then
+        return res:gsub('\r', '')
+      else
+        return res
+      end
+    end
+  end
 end
 
 function handleEvents(time)
-  event.pull(time or 0, "invalid_event_name_just_to_make_signals_process")
+  event.pull(time or 0, 'invalid_event_name_just_to_make_signals_process')
 end
 
 function termColor(newColor)
   if (component.isAvailable("gpu")) then
     component.gpu.setForeground(newColor)
   end
+end
+
+function printColor(color, ...)
+  termColor(color)
+  print(...)
+  termColor(0xFFFFFF)
 end
 
 function hashBytes(bytes)
@@ -126,9 +231,9 @@ function hashBytes(bytes)
 end
 
 function binToHex(hash)
-  local ret = ""
+  local ret = ''
   for i = 1, hash:len() do
-    ret = ret .. string.format("%02x", string.byte(hash, i))
+    ret = ret .. string.format('%02x', string.byte(hash, i))
   end
   return ret
 end
@@ -137,7 +242,7 @@ function fsTraverse(path, fn)
   files = filesystem.list
   if files then
     for file in filesystem.list(path) do
-      if file:sub(-1) == "/" then
+      if file:sub(-1) == '/' then
         fsTraverse(path .. file, fn)
       else
         fn(path .. file)
@@ -328,7 +433,7 @@ do
       a, b, c, d = transform(a, b, c, d, X)
     end
 
-    return hex2binary(string.format("%08x%08x%08x%08x", swap(a), swap(b), swap(c), swap(d)))
+    return hex2binary(string.format('%08x%08x%08x%08x', swap(a), swap(b), swap(c), swap(d)))
   end
 end
 
